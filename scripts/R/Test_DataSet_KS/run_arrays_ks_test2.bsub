@@ -1,0 +1,17 @@
+### -- set walltime limit: hh:mm --
+#BSUB -W 2:00
+#BSUB -R "rusage[mem=14GB]"
+#BSUB -o <PATH>/log_files/Output_%J_%I.out
+#BSUB -e <PATH>/log_files/Error_%J_%I.out
+
+echo "In bsub file..."
+echo "Job ID is: ${LSB_JOBID}     Array ID is: ${LSB_JOBINDEX}"
+echo "TMPDIR is: ${TMPDIR}"
+echo "outPrefix is: ${outPrefix}"
+
+cd <PATH to R code>
+
+module load R/R-4.0.5
+Rscript comparison_FG_and_RSF_ks_test2.R "${LSB_JOBINDEX}" "${dataDir}" "${train_name}" "${train_y}" "${val_name}" "${val_y}" \
+                                      "${mtry}" "${nodesize}" "${ntrees}"
+
