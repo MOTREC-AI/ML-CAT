@@ -146,73 +146,92 @@ def plot_roc(df, ks_col, event_col, title=None, fname=None, save=False):
         plt.savefig(get_parent_dir() / f"visualizations/{fname}.svg", dpi=300, format="svg")
     plt.show()
 
-    
-    
-def get_estimated_cif(durations, events, event_of_interest=1, time_of_interest=180.0):
+
+def get_estimated_cif(durations, events, event_of_interest=1, time_of_interest=180.0, calculate_variance=False):
     """Get Competing Risk Estimate """
-    ajf = lifelines.AalenJohansenFitter(calculate_variance=True)
+    if isinstance(durations, pd.Series):
+        durations = durations.values
+    if isinstance(events, pd.Series):
+        events = events.values
+    ajf = lifelines.AalenJohansenFitter(calculate_variance=calculate_variance,
+                                        jitter_level=0.00001,
+                                        seed=int(os.environ["RANDOM_SEED"]))
     ajf.fit(durations, events, event_of_interest=event_of_interest)
     res = ajf.cumulative_density_.loc[time_of_interest].values[0]
     return res
 
 
-def bootstrap_prevalence_vte(durations, events, n_bootstrap=200):
+def bootstrap_prevalence_vte(durations, events, n_bootstrap=200, time_of_interest=180.0):
     cifs = []
     for i in range(n_bootstrap):
-        durations_sampled, events_sampled = resample(durations, events, n_samples=len(durations), random_state=i)
-        cifs.append(100*get_estimated_cif(durations_sampled, events_sampled))
+        durations_sampled, events_sampled = resample(durations,
+                                                     events,
+                                                     n_samples=len(durations),
+                                                     random_state=i)
+        cifs.append(100*get_estimated_cif(durations_sampled,
+                                          events_sampled,
+                                          time_of_interest=time_of_interest))
     return cifs
 
 
-def plot_grouped_risks(cif, time_of_interest=None, q=5, name=None, save=False):
+def get_pair_counts_and_vte(df, ks_condition, cif_condition, alpha=0.05, time_of_interest=180.0):
+    filtered_df = df[ks_condition & cif_condition]
+    pair_count = len(filtered_df)
+    vte_estimates = bootstrap_prevalence_vte(filtered_df["obs_time"],
+                                             filtered_df["event"],
+                                             n_bootstrap=2000,
+                                             time_of_interest=time_of_interest)
+    lower = np.percentile(vte_estimates, 100 * (alpha / 2))
+    upper = np.percentile(vte_estimates, 100 * (1 - alpha / 2))
+    mean = np.mean(vte_estimates)
+    return pair_count, round(mean, 2), round(lower, 2), round(upper, 2)
+
+
+def plot_grouped_risks(cif,
+                       durations,
+                       events,
+                       time_of_interest=181,
+                       event_of_interest=1,
+                       q=5,
+                       name=None,
+                       save=False):
     """
     cif: cumulative risk of VTE and Death 
          Shape: (2, days, # patients)
     time_of_interest: Time point to define risk groups
     q: number of quantiles for the grouping
     """
-    cif_180 = np.array(100*pd.Series(cif[0][180]))
-    cuts_vte, bins = pd.qcut(cif_180, q=q, labels=[1, 2, 3, 4, 5], retbins=True)
-    
-    # Find unique groups
-    unique_groups = np.unique(cuts_vte)
-    
-    # Calculate the mean for each group
-    group_means = {group: np.mean(cif[0][:, cuts_vte == group], axis=1) for group in unique_groups}
-    
-    # plotting params
-    
-    fig, ax = plt.subplots(figsize=(12, 10))
-
-    # Plot the group means as line plots
     days_to_months = 30
-    i = 0
-    for group, means in group_means.items():
-        if time_of_interest is None:
-            ax.plot(means, label=f"Group {group}: {round(bins[i], 1)}% - {round(bins[i+1], 1)}%")
-        else:
-            ax.plot(means[:time_of_interest], label=f"Group {group}: {round(bins[i], 1)}% - {round(bins[i+1], 1)}%")
-        i += 1
+    # get the risk of VTE at six months
+    cif_180 = np.array(100*pd.Series(cif[0][time_of_interest]))
+    # cuts_vte, bins = pd.qcut(cif_180, q=q, labels=[1, 2, 3, 4, 5], retbins=True)
+    cuts_vte = np.where(cif_180 >= 9, 2, 1)
+    print(pd.Series(cuts_vte).value_counts())
+    unique_groups = np.unique(cuts_vte)
+    fig, ax = plt.subplots(figsize=(16, 12))
+    labels = ["Low Risk (<9%)", "High Risk (>=9%)"]
 
+    for i, group in enumerate(unique_groups):
+        ajf = lifelines.AalenJohansenFitter(
+            calculate_variance=True,
+            jitter_level=0.00001,
+            seed=int(os.environ["RANDOM_SEED"]))
+        ajf.fit(durations[cuts_vte == group],
+                events[cuts_vte == group],
+                event_of_interest=event_of_interest)
+        # plots the estimate method = self._estimation_method = "cumulative_density_" for ajf
+        ajf.plot(ax=ax, ci_show=True, label=f"Group {group}: {labels[i]}")
+        # print(ajf.cumulative_density_)
     # Add a legend
-    lgd = ax.legend(bbox_to_anchor=(0.5, -0.2), loc='upper center', ncol=3)
-
-    # Set the labels for x and y axes
-    ax.set_xlabel('Time (in Months)')
-    max_days = len(means)
-    if time_of_interest is None:
-        time_of_interest = max_days
-     # set tick interval to months if time is less than an year else quarterly
+    lgd = ax.legend(bbox_to_anchor=(0.2, 1), loc='upper center', ncol=1)
     tick_intervals = 30 if time_of_interest < 400 else 90
     tick_positions = np.arange(0, time_of_interest, tick_intervals)
     tick_labels = tick_positions // days_to_months
     ax.set_xticks(tick_positions)
     ax.set_xticklabels(tick_labels)
     ax.set_ylabel('Cumulative Incidence')
-    # Add a vertical line at 180 days
-    if time_of_interest>365:
-        vertical_line_position = 180
-        ax.axvline(vertical_line_position, color='k')
+    ax.set_xlabel('Time (in Months)')
+    plt.title(f"{name} (n={len(durations)})")
 
     if save:
         if not name:
@@ -224,6 +243,7 @@ def plot_grouped_risks(cif, time_of_interest=None, q=5, name=None, save=False):
             bbox_inches="tight",
             bbox_extra_artists=(lgd,)
         );
+
 
 def plot_calibration(cif, events, durations, feature, bins=None, save=False, name=None):
     """
